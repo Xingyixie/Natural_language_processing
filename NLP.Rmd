@@ -1,0 +1,214 @@
+---
+title: "NLP"
+author: "Charles Lang"
+---
+
+## Libraries
+```{r}
+#Make sure you install and load the following libraries
+
+library(tm)
+library(SnowballC)
+library(wordcloud)
+library(ggplot2)
+library(tidyverse) #You will need the full tidyverse package not tidyr and dyplr separately
+library(topicmodels)
+
+#IF USING A MAC PLEASE RUN THIS CODE
+Sys.setlocale("LC_ALL", "C")
+```
+
+## In the class-notes folder you will find real csv files exported from real student's note taking in this class. Import all document files and the list of weeks file
+```{r}
+library(tidyverse)
+
+#Create a list of all the files, then loop over file list importing them and binding them together
+D1 <- list.files(path = "C:/Users/BEIB/Desktop/A/4051/R/Xingyixie_natural-language-processing/class-notes/",
+               pattern = "*.csv", 
+               full.names = T) %>% 
+    map_df(~read_csv(., col_types = cols(.default = "c"))) 
+  
+```
+
+## Step 1 - Clean
+```{r}
+#Separate out the variables of interest
+D1 <- select(D1, Title, Notes)
+
+#Remove the htlm tags from your text
+D1$Notes <- gsub("<.*?>", "", D1$Notes)
+D1$Notes <- gsub("nbsp", "" , D1$Notes)
+D1$Notes <- gsub("nbspnbspnbsp", "" , D1$Notes)
+D1$Notes <- gsub("<U+00A0><U+00A0><U+00A0>", "" , D1$Notes)
+
+#Merge the weeks data with your notes data so that each line has a week attributed to it 
+
+#Also remove readings not belonging to the class (IE - that are NA for week)
+
+```
+
+## Step 2 - Process text using the tm package
+```{r}
+#Convert the data frame to the corpus format that the tm package uses
+corpus <- VCorpus(VectorSource(D1$Notes))
+#Remove spaces
+corpus <- tm_map(corpus, stripWhitespace)
+#Convert to lower case
+corpus <- tm_map(corpus, tolower)
+#Remove pre-defined stop words ('the', 'a', etc)
+corpus <- tm_map(corpus, removeWords, stopwords('english'))
+#Convert words to stems ("education" = "edu") for analysis, for more info see  http://tartarus.org/~martin/PorterStemmer/
+corpus <- tm_map(corpus, stemDocument)
+#Remove numbers
+corpus <- tm_map(corpus, removeNumbers)
+#remove punctuation
+corpus <- tm_map(corpus, removePunctuation)
+#Convert to plain text for mapping by wordcloud package
+corpus <- tm_map(corpus, PlainTextDocument, lazy = TRUE)
+
+#Convert corpus to a term document matrix - so each word can be analyzed individuallly
+tdm.corpus <- TermDocumentMatrix(corpus)
+
+#Note: we won't remove plural words here, plural words in English tend to be highly irregular and difficult to extract reliably
+```
+
+What processing steps have you conducted here? Why is this important? Are there any other steps you should take to process your text before analyzing?
+
+##The above processes the text by removing spaces, case conversion, deactivating words, converting near-synonyms, removing numbers, removing punctuation, etc.
+##Before these processes we can also de-duplicate the text, phrase processing, mechanical compression processing, and remove some meaningless text.
+
+## Step 3 - Find common words
+```{r}
+#The tm package can do some simple analysis, like find the most common words
+findFreqTerms(tdm.corpus, lowfreq=500, highfreq=Inf)
+#We can also create a vector of the word frequencies that can be useful to see common and uncommon words
+word.count <- sort(rowSums(as.matrix(tdm.corpus)), decreasing=TRUE)
+word.count <- data.frame(word.count)
+#Look at the word.count dataframe
+```
+
+## Generate a Word Cloud
+
+### ColorBrewer
+ColorBrewer is a useful tool to help you choose colors for visualizations that was originally built for cartographers. On the ColorBrewer website (http://colorbrewer2.org/#) you can test different color schemes or see what their preset color schemes look like. This is very useful, especially if you are making images for colorblind individuals. 
+```{r}
+#Define the colors the cloud will use
+col=brewer.pal(6,"Dark2")
+#Generate cloud, make sure your window is large enough to see it
+wordcloud(corpus, min.freq=500, scale=c(5,2),rot.per = 0.25,
+          random.color=T, max.word=45, random.order=F,colors=col)
+```
+
+# Sentiment Analysis
+
+### Match words in corpus to lexicons of positive & negative words
+```{r}
+#Upload positive and negative word lexicons
+positive <- readLines("positive-words.txt")
+negative <- readLines("negative-words.txt")
+
+#Search for matches between each word and the two lexicons
+D1$positive <- tm_term_score(tdm.corpus, positive)
+D1$negative <- tm_term_score(tdm.corpus, negative)
+
+#Generate an overall pos-neg score for each line
+D1$score <- D1$positive - D1$negative
+
+```
+
+## Using ggplot Generate a visualization of the mean sentiment score over weeks, remove rows that have readings from other classes (NA for weeks). You will need to summarize your data to achieve this.
+```{r}
+library(sqldf)
+library(gsubfn)
+library(proto)
+library(RSQLite)
+library(lubridate)
+library(ggplot2)
+D2 <- list.files(path = "C:/Users/BEIB/Desktop/A/4051/R/Xingyixie_natural-language-processing/class-notes/",
+               pattern = "*.csv", 
+               full.names = T) %>% 
+    map_df(~read_csv(., col_types = cols(.default = "c"))) 
+df_list <- cbind(D1,subset(D2, select = `Date Added` ))
+df_list$`Date Added`<-as.Date(df_list$`Date Added`,format="%Y-%m-%d")
+df_list$week<-week(df_list$`Date Added`)
+score_mean<-sqldf("select week ,avg(score) avg_score from df_list group by week")
+ggplot(score_mean, aes(x=week, y=avg_score, group=1)) + geom_line(linetype="dotted")
+```
+
+# LDA Topic Modelling
+
+Using the same csv file you have generated the LDA analysis will treat each row of the data frame as a document. Does this make sense for generating topics?
+#Yes
+
+```{r}
+#Term Frequency Inverse Document Frequency
+dtm.tfi <- DocumentTermMatrix(corpus, control = list(weighting = weightTf))
+
+#Remove very uncommon terms (term freq inverse document freq < 0.1)
+dtm.tfi <- dtm.tfi[,dtm.tfi$v >= 0.1]
+
+#Remove non-zero entries
+rowTotals <- apply(dtm.tfi , 1, sum) #Find the sum of words in each Document
+dtm.tfi2   <- dtm.tfi[rowTotals> 0, ] #Divide by sum across rows
+
+#Identify rows with zero entries
+#which(rowTotals %in% c(0))
+
+#Remove these rows from original dataset
+D1 <- D1[-c(which(rowTotals %in% c(0))),]
+
+#Generate LDA model, k is the number of topics and the seed is a random number to start the process
+lda.model = LDA(dtm.tfi2, k = 5, seed = 150)
+
+#Which terms are most common in each topic
+terms(lda.model, k = 10) 
+
+#Identify which documents belong to which topics based on the notes taken by the student
+D1$topic <- topics(lda.model)
+
+```
+
+What does an LDA topic represent? 
+## 5 topics were generated, the main keywords of topic 1 are data, model, cluster, predict which represent the data model clustering prediction related subjects.
+##The main keywords of topic 2 are network, actor, social, data, which represent the social network related themes.
+##The main keywords of topic 3 are educ, learn, analyt, student, which represent the study topics related to learning.
+##The main keywords of topic 4 are model, student, skill, learn, method, which represent the themes related to learning skills and methods.
+##The main keywords in topic 5 are student, learn, school, teacher, educ which represent the school student teacher related themes.
+
+
+# Final Task 
+
+Find a set of documents, perhaps essays you have written or articles you have available and complete an LDA analysis of those documents. Does the method group documents as you would expect?
+
+
+```{r}
+jobs <- read.csv("jobs.csv", comment.char="#")
+jobs$JobText <- gsub("<.*?>", "", jobs$JobText)
+jobs$JobText <- gsub("nbsp", "" , jobs$JobText)
+jobs$JobText <- gsub("nbspnbspnbsp", "" , jobs$JobText)
+jobs$JobText <- gsub("<U+00A0><U+00A0><U+00A0>", "" , jobs$JobText)
+
+corpus <- VCorpus(VectorSource(jobs$JobText))
+corpus <- tm_map(corpus, stripWhitespace)
+corpus <- tm_map(corpus, tolower)
+corpus <- tm_map(corpus, removeWords, stopwords('english'))
+corpus <- tm_map(corpus, stemDocument)
+corpus <- tm_map(corpus, removeNumbers)
+corpus <- tm_map(corpus, removePunctuation)
+corpus <- tm_map(corpus, PlainTextDocument, lazy = TRUE)
+
+tdm.corpus <- TermDocumentMatrix(corpus)
+dtm.tfi <- DocumentTermMatrix(corpus, control = list(weighting = weightTf))
+dtm.tfi <- dtm.tfi[,dtm.tfi$v >= 0.1]
+rowTotals <- apply(dtm.tfi , 1, sum) #Find the sum of words in each Document
+jobs <- jobs[-c(which(rowTotals %in% c(0))),]
+dtm.tfi2   <- dtm.tfi[rowTotals> 0, ] #Divide by sum across rows
+lda.model = LDA(dtm.tfi2, k = 3, seed = 150)
+terms(lda.model, k = 10) 
+jobs$topic <- topics(lda.model)
+```
+##Three main topics are generated.
+##topic1 is mainly about experi, manag, work, abil. The main feedback is that the employer is looking for a managerial employee with relevant experience and ability to communicate well.
+##topic2 The main keywords are custom, perform, sell, safeti.The main feedback is that employers are looking for employees who have experience in protecting, encrypting company customer information or procedures.
+##topic3 The main keywords are care, nurse, medic, support.The main feedback is that the employer is looking for a patient nurse staff to do some related medical assistance work.
+##This is really the kind of information I wanted to see, and the results clearly categorize this job posting document to show some of the most current positions and competencies needed in the relevant area.
